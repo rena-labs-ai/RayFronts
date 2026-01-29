@@ -33,7 +33,7 @@
 - 🚀 Bootstrap your semantic mapping project. Utilize the modular RayFronts mapping codebase with its supported datasets to build your project (Novel encoding, novel mapping, novel feature fusion...etc.) and get results fast.
 - 💬 Reach out or raise an issue if you face any problems !
 ## News/Release
-- [01.29.2026] 🔥🔥🔥 [RADSeg](https://github.com/RADSeg-OVSS/RADSeg) has been released a much stronger encoder than NARADIO !
+- [01.29.2026] 🔥🔥🔥 [RADSeg](https://github.com/RADSeg-OVSS/RADSeg) has been released. A much stronger encoder than NARADIO !
 - [06.16.2025] RayFronts has been accepted to [IROS25](https://www.iros25.org/).
 - [06.12.2025] RayFronts has been accepted to [RSS25](https://roboticsconference.org/) [SemRobs](https://semrob.github.io/) & [RoboReps](https://rss25-roboreps.github.io/) Workshops.
 - [06.11.2025] RayFronts code is released !
