@@ -107,6 +107,39 @@ You can build the image by going to the docker directory then running:
 
 To run the docker image, an example command is available at the top of each docker file.
 
+### Offline rosbag2 (MCAP)
+If you have a recorded ROS2 bag (MCAP `.mcap` / `.mcap.zstd`), you can run RayFronts
+offline in Docker with:
+
+```
+docker/run_offline_mcap.sh /path/to/bag_dir
+```
+
+See `docker/offline/README.md` for details and expected topics.
+
+### Live ROS2 (Simulation / Robot)
+To run RayFronts live against ROS2 topics (no recorded bags):
+
+```
+docker/run_live_ros2.sh -- <hydra overrides...>
+```
+
+If you want to record live topics to MCAP+zstd for later replay:
+
+```
+docker/run_record_mcap.sh /path/to/output_bag_name
+```
+
+### Model cache (Docker)
+The Docker scripts persist model caches so HuggingFace / torch hub weights
+don’t re-download every run.
+
+- Default (non-root container, `RUN_AS_USER=1`): bind-mount host cache dir
+  `~/.cache/rayfronts_docker` (override with `CACHE_DIR=...`).
+- Root-in-container (`RUN_AS_USER=0`): mount a named volume to `/root/.cache`
+  (default: `rayfronts_cache`, override with `CACHE_VOLUME=...`).
+- Disable caching: `DISABLE_CACHE=1`
+
 ## Running RayFronts
 
 1. Setup the data source / dataset. Head to the [datasets](rayfronts/datasets) folder to learn more about the available options. Each dataset class documents how to download and structure your data. For now you can download [NiceSlam Replica](https://github.com/cvg/nice-slam/blob/master/scripts/download_replica.sh) to test.
