@@ -319,10 +319,55 @@ class NARadioEncoder(LangSpatialGlobalImageEncoder):
   @override
   def encode_prompts(self, prompts: List[str]) -> torch.FloatTensor:
     with torch.autocast("cuda", dtype=torch.float16, enabled=self.amp):
-      text = self.lang_adaptor.tokenizer(prompts).to(self.device)
+      text = self._tokenize_prompts(prompts).to(self.device)
       text_features = self.lang_adaptor.encode_text(text)
       text_features /= text_features.norm(dim=-1, keepdim=True)
     return text_features.float()
+
+  def _tokenize_prompts(self, prompts: List[str]) -> torch.LongTensor:
+    """Tokenize prompts robustly across tokenizer API variants.
+
+    Some installed transformer tokenizers (e.g. certain T5 variants) do not
+    expose `batch_encode_plus`, while open_clip's HFTokenizer currently expects
+    it. Fall back to calling the underlying HuggingFace tokenizer directly.
+    """
+    tok = self.lang_adaptor.tokenizer
+    try:
+      return tok(prompts)
+    except AttributeError as e:
+      if "batch_encode_plus" not in str(e):
+        raise
+
+    hf_tok = getattr(tok, "tokenizer", None)
+    if hf_tok is None:
+      raise
+
+    clean_fn = getattr(tok, "clean_fn", None)
+    if callable(clean_fn):
+      prompts = [clean_fn(p) for p in prompts]
+
+    context_length = getattr(tok, "context_length", None)
+    if context_length is None:
+      raise ValueError("Tokenizer context_length is not set.")
+
+    encoded = hf_tok(
+      prompts,
+      return_tensors="pt",
+      max_length=context_length,
+      padding="max_length",
+      truncation=True,
+    )
+    tokens = getattr(encoded, "input_ids", None)
+    if tokens is None:
+      tokens = encoded["input_ids"]
+
+    if getattr(tok, "strip_sep_token", False):
+      sep_token_id = getattr(hf_tok, "sep_token_id", None)
+      if sep_token_id is not None:
+        tokens = torch.where(tokens == sep_token_id,
+                             torch.zeros_like(tokens),
+                             tokens)
+    return tokens
 
   @override
   def encode_image_to_vector(
