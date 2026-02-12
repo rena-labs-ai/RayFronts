@@ -1,0 +1,41 @@
+defaults:
+  - base_dataset
+
+_target_: rayfronts.datasets.McapRos2Dataset
+
+# Path to a rosbag2 MCAP file.
+path: ???
+
+# Topic containing compressed RGB images (sensor_msgs/msg/CompressedImage).
+rgb_topic: "/base/camera/color/image_raw/compressed"
+
+# Topic containing compressed depth images (sensor_msgs/msg/CompressedImage).
+depth_topic: "/base/camera/aligned_depth_to_color/image_raw/compressedDepth"
+
+# Topic containing camera intrinsics (sensor_msgs/msg/CameraInfo).
+camera_info_topic: "/base/camera/color/camera_info"
+
+# TF topics.
+tf_topic: "/tf"
+tf_static_topic: "/tf_static"
+
+# Target frame for poses. Use "auto" to prefer map -> odom -> world.
+target_frame: "auto"
+
+# Frame to treat as the robot/camera pose source. "auto" resolves from TF graph.
+pose_frame: "auto"
+
+# Coordinate convention of pose_frame (e.g. "flu", "rdf").
+src_coord_system: "flu"
+
+# 16UC1 depth scaling to meters.
+depth_scale: 0.001
+
+# RGB/depth timestamp sync tolerance.
+sync_slop_s: 0.05
+
+# Pose lookup tolerance.
+pose_slop_s: 0.2
+
+# On missing pose: drop | last | identity
+pose_fallback: "drop"

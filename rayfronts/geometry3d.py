@@ -4,7 +4,44 @@ from typing import Tuple
 
 import torch
 import numpy as np
-import torch_scatter
+
+try:
+  import torch_scatter
+except ModuleNotFoundError:
+  torch_scatter = None
+
+
+def _scatter_reduce(src: torch.Tensor,
+                    index: torch.Tensor,
+                    out: torch.Tensor,
+                    reduce: str,
+                    dim: int = 0):
+  """Fallback for torch_scatter.scatter when torch_scatter is unavailable."""
+  if torch_scatter is not None:
+    torch_scatter.scatter(src=src, index=index, out=out, reduce=reduce, dim=dim)
+    return out
+
+  if dim != 0:
+    raise NotImplementedError("Fallback scatter only supports dim=0")
+
+  if reduce in ["sum", "add"]:
+    out.index_add_(0, index, src)
+    return out
+
+  if reduce in ["mean", "avg"]:
+    out.index_add_(0, index, src)
+    counts = torch.bincount(index, minlength=out.shape[0]).to(out.device)
+    counts = torch.clamp(counts, min=1).unsqueeze(-1).to(out.dtype)
+    out /= counts
+    return out
+
+  if reduce == "max":
+    out.fill_(-torch.inf)
+    for i in range(src.shape[0]):
+      out[index[i]] = torch.maximum(out[index[i]], src[i])
+    return out
+
+  raise ValueError(f"Unsupported reduce mode: {reduce}")
 
 def pts_to_homogen(pts):
   """Works on last dimension"""
@@ -302,8 +339,8 @@ def pointcloud_to_sparse_voxels(xyz_pc, vox_size, feat_pc=None,
   feat_vx = torch.zeros((xyz_vx.shape[0], feat_pc.shape[-1]), device=d,
                          dtype=feat_pc.dtype)
 
-  torch_scatter.scatter(
-    src=feat_pc, index=reduce_ind, out=feat_vx, reduce=aggregation, dim=0)
+  _scatter_reduce(src=feat_pc, index=reduce_ind, out=feat_vx,
+                  reduce=aggregation, dim=0)
 
   xyz_vx = xyz_vx.type(torch.float)*vox_size
   counts_vx = counts_vx.type(torch.float).unsqueeze(-1)
@@ -995,8 +1032,8 @@ def bin_rays(rays, vox_size, bin_size=30, feat=None,
     feat[:, :-1] = feat[:, :-1] * feat[:, -1:]
     reduce = "sum"
 
-  torch_scatter.scatter(
-    src=feat, index=reduce_ind, out=binned_feat, reduce=reduce, dim=0)
+  _scatter_reduce(src=feat, index=reduce_ind, out=binned_feat,
+                  reduce=reduce, dim=0)
 
   if aggregation == "weighted_mean":
     # Divide features by total weight
