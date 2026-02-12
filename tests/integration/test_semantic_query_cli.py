@@ -198,3 +198,64 @@ def test_cli_auto_sets_radio_spatial_alignment_flag():
     '{"vox_size": 0.2, "vox_accum_period": 1, "max_pts_per_frame": -1, "device": "cpu"}',
   ])
   assert out["processed_frames"] == 1
+
+
+def test_cli_can_query_multiple_objects_after_single_map_build():
+  out = _run_cli([
+    "--source", "dataset",
+    "--dataset-class", "tests.stubs.semantic_stubs.ToyDataset",
+    "--dataset-kwargs", '{"num_frames": 3}',
+    "--objects", "door", "wall",
+    "--top-k", "5",
+    "--max-frames", "3",
+    "--encoder-class", "tests.stubs.semantic_stubs.ToyEncoder",
+    "--mapper-class", "rayfronts.mapping.semantic_voxel_map.SemanticVoxelMap",
+    "--mapper-kwargs",
+    '{"vox_size": 0.2, "vox_accum_period": 1, "max_pts_per_frame": -1, "device": "cpu"}',
+  ])
+  assert out["processed_frames"] == 3
+  assert "queries" in out
+  assert len(out["queries"]) == 2
+  names = [q["query"] for q in out["queries"]]
+  assert names == ["door", "wall"]
+  assert all("cluster_mean_xyz" in q for q in out["queries"])
+
+
+def test_cli_saved_map_mode_supports_multi_query_and_per_query_json(tmp_path: Path):
+  map_path = tmp_path / "toy_map.pt"
+  per_query_dir = tmp_path / "per_query"
+
+  build = _run_cli_raw([
+    "--source", "dataset",
+    "--dataset-class", "tests.stubs.semantic_stubs.ToyDataset",
+    "--dataset-kwargs", '{"num_frames": 3}',
+    "--object", "door",
+    "--top-k", "5",
+    "--max-frames", "3",
+    "--encoder-class", "tests.stubs.semantic_stubs.ToyEncoder",
+    "--mapper-class", "rayfronts.mapping.semantic_voxel_map.SemanticVoxelMap",
+    "--mapper-kwargs",
+    '{"vox_size": 0.2, "vox_accum_period": 1, "max_pts_per_frame": -1, "device": "cpu"}',
+    "--save-map", str(map_path),
+  ])
+  assert build.returncode == 0, build.stderr
+  assert map_path.exists()
+  assert Path(str(map_path) + ".meta.json").exists()
+
+  out = _run_cli([
+    "--source", "saved_map",
+    "--load-map", str(map_path),
+    "--objects", "door", "wall",
+    "--per-query-output-dir", str(per_query_dir),
+  ])
+  assert "queries" in out
+  assert len(out["queries"]) == 2
+  assert sorted(p["query"] for p in out["queries"]) == ["door", "wall"]
+  assert "per_query_json" in out
+  assert len(out["per_query_json"]) == 2
+  for p in out["per_query_json"]:
+    pp = Path(p)
+    assert pp.exists()
+    payload = json.loads(pp.read_text(encoding="utf-8"))
+    assert "estimated_xyz" in payload
+    assert "salient_voxels" in payload

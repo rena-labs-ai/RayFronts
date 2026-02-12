@@ -8,8 +8,10 @@ import inspect
 import json
 import logging
 from pathlib import Path
+import re
 import sys
-from typing import Any, Dict, Optional
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -72,6 +74,105 @@ def _instantiate(cls_path: str, kwargs: Dict[str, Any]):
     ) from exc
 
 
+def _metadata_path_for_map(map_path: Path) -> Path:
+  return Path(str(map_path) + ".meta.json")
+
+
+def _load_map_metadata(map_path: Path, explicit_path: Optional[str]) -> Dict[str, Any]:
+  meta_path = Path(explicit_path) if explicit_path is not None else _metadata_path_for_map(map_path)
+  if not meta_path.exists():
+    return dict()
+  try:
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+  except json.JSONDecodeError as exc:
+    raise ValueError(f"Invalid JSON metadata file: {meta_path}") from exc
+
+
+def _apply_metadata_defaults(args, metadata: Dict[str, Any]) -> None:
+  if args.encoder_class is None and metadata.get("encoder_class") is not None:
+    args.encoder_class = metadata["encoder_class"]
+
+  mapper_default = "rayfronts.mapping.semantic_voxel_map.SemanticVoxelMap"
+  if args.mapper_class == mapper_default and metadata.get("mapper_class") is not None:
+    args.mapper_class = metadata["mapper_class"]
+
+  if args.encoder_kwargs == "{}" and isinstance(metadata.get("encoder_kwargs"), dict):
+    args.encoder_kwargs = json.dumps(metadata["encoder_kwargs"])
+  if args.mapper_kwargs == "{}" and isinstance(metadata.get("mapper_kwargs"), dict):
+    args.mapper_kwargs = json.dumps(metadata["mapper_kwargs"])
+
+
+def _parse_intrinsics_from_metadata(metadata: Dict[str, Any]) -> torch.FloatTensor:
+  intrinsics = metadata.get("intrinsics_3x3")
+  if intrinsics is None:
+    return torch.eye(3, dtype=torch.float32)
+  intrinsics = torch.tensor(intrinsics, dtype=torch.float32)
+  if intrinsics.shape != (3, 3):
+    raise ValueError("Map metadata intrinsics_3x3 must have shape 3x3.")
+  return intrinsics
+
+
+def _collect_queries(args) -> List[str]:
+  raw = list()
+  if args.query is not None:
+    raw.append(args.query)
+  if args.objects is not None:
+    raw.extend(args.objects)
+
+  queries = list()
+  seen = set()
+  for item in raw:
+    for token in item.split(","):
+      q = token.strip()
+      if len(q) == 0:
+        continue
+      if q in seen:
+        continue
+      seen.add(q)
+      queries.append(q)
+  return queries
+
+
+def _slugify(s: str) -> str:
+  slug = re.sub(r"[^a-zA-Z0-9]+", "_", s.strip().lower())
+  slug = slug.strip("_")
+  return slug if len(slug) > 0 else "query"
+
+
+def _single_query_output(estimate_dict: Dict[str, Any],
+                         args,
+                         processed_frames: int,
+                         source_path: Optional[str],
+                         run_config: Dict[str, Any]) -> Dict[str, Any]:
+  out = dict(estimate_dict)
+  out["processed_frames"] = processed_frames
+  if source_path is not None:
+    out["source_path"] = source_path
+  out["run_config"] = run_config
+  return out
+
+
+def _build_run_config(args, dataset=None, loaded_map: Optional[str] = None) -> Dict[str, Any]:
+  return dict(
+    source=args.source,
+    query_type=args.query_type,
+    top_k=args.top_k,
+    cluster_radius=args.cluster_radius,
+    max_frames=args.max_frames,
+    frame_skip=args.frame_skip,
+    depth_limit=args.depth_limit,
+    target_frame=args.target_frame,
+    pose_frame=args.pose_frame,
+    resolved_target_frame=getattr(dataset, "_resolved_target_frame", None),
+    resolved_pose_frame=getattr(dataset, "_resolved_pose_frame", None),
+    mapper_class=args.mapper_class,
+    mapper_kwargs=_parse_json_dict(args.mapper_kwargs, "--mapper-kwargs"),
+    encoder_class=args.encoder_class,
+    encoder_kwargs=_parse_json_dict(args.encoder_kwargs, "--encoder-kwargs"),
+    loaded_map=loaded_map,
+  )
+
+
 def _build_dataset(args) -> Any:
   if args.source == "mcap":
     return McapRos2Dataset(
@@ -113,7 +214,7 @@ def _build_dataset(args) -> Any:
   return _instantiate(args.dataset_class, dataset_kwargs)
 
 
-def _build_mapper(args, dataset) -> Any:
+def _build_mapper(args, dataset=None, intrinsics_3x3: Optional[torch.FloatTensor] = None) -> Any:
   mapper_kwargs = _parse_json_dict(args.mapper_kwargs, "--mapper-kwargs")
   encoder = None
   if args.encoder_class is not None:
@@ -139,7 +240,12 @@ def _build_mapper(args, dataset) -> Any:
   mapper_cls = import_symbol(args.mapper_class)
   sig = inspect.signature(mapper_cls.__init__).parameters
   if "intrinsics_3x3" in sig and "intrinsics_3x3" not in mapper_kwargs:
-    mapper_kwargs["intrinsics_3x3"] = dataset.intrinsics_3x3
+    if intrinsics_3x3 is not None:
+      mapper_kwargs["intrinsics_3x3"] = intrinsics_3x3
+    elif dataset is not None and hasattr(dataset, "intrinsics_3x3"):
+      mapper_kwargs["intrinsics_3x3"] = dataset.intrinsics_3x3
+    else:
+      mapper_kwargs["intrinsics_3x3"] = torch.eye(3, dtype=torch.float32)
   if "device" in sig and "device" not in mapper_kwargs:
     mapper_kwargs["device"] = _resolve_device(args.device, "mapper")
   elif "device" in mapper_kwargs:
@@ -163,10 +269,12 @@ def _parse_resolution(s: Optional[str]):
 
 def build_parser():
   parser = argparse.ArgumentParser("Semantic Query CLI")
-  parser.add_argument("--source", choices=["mcap", "live", "dataset"],
+  parser.add_argument("--source", choices=["mcap", "live", "dataset", "saved_map"],
                       required=True, help="Input source type.")
-  parser.add_argument("--object", dest="query", required=True,
+  parser.add_argument("--object", dest="query", required=False,
                       help="Object label/prompt to query.")
+  parser.add_argument("--objects", nargs="+", default=None,
+                      help="Optional additional objects to query in the same mapped scene.")
   parser.add_argument("--top-k", type=int, default=5,
                       help="Number of salient voxels for estimation.")
   parser.add_argument("--cluster-radius", type=float, default=1.0,
@@ -196,6 +304,14 @@ def build_parser():
 
   parser.add_argument("--output-json", type=str, default=None,
                       help="Optional path to write JSON output.")
+  parser.add_argument("--per-query-output-dir", type=str, default=None,
+                      help="Optional directory to write one JSON file per queried object.")
+  parser.add_argument("--save-map", type=str, default=None,
+                      help="Optional path to save mapped voxels for reuse.")
+  parser.add_argument("--load-map", type=str, default=None,
+                      help="Load an existing map and skip mapping stage.")
+  parser.add_argument("--map-metadata", type=str, default=None,
+                      help="Optional metadata JSON path for a loaded map.")
 
   # MCAP options
   parser.add_argument("--mcap-path", type=str, default=None)
@@ -231,8 +347,22 @@ def build_parser():
 def validate_args(args):
   if args.cluster_radius <= 0:
     raise ValueError("--cluster-radius must be > 0.")
+  queries = _collect_queries(args)
+  if len(queries) == 0:
+    raise ValueError("At least one query is required via --object or --objects.")
   if args.encoder_class is None:
     raise ValueError("--encoder-class is required for semantic text querying.")
+
+  if args.source == "saved_map":
+    if args.load_map is None:
+      raise ValueError("--load-map is required when --source saved_map.")
+    if args.save_map is not None:
+      raise ValueError("--save-map cannot be used with --source saved_map.")
+    return
+
+  if args.load_map is not None:
+    raise ValueError("--load-map is only supported when --source saved_map.")
+
   if args.source == "mcap" and not args.mcap_path:
     raise ValueError("--mcap-path is required when --source mcap.")
   if args.source == "live" and args.rgb_topic is None:
@@ -261,55 +391,123 @@ def main(argv=None) -> int:
   args = parser.parse_args(argv)
   args.rgb_resolution = _parse_resolution(args.rgb_resolution)
   args.depth_resolution = _parse_resolution(args.depth_resolution)
+  metadata = dict()
+
+  if args.source == "saved_map":
+    map_path = Path(args.load_map) if args.load_map is not None else None
+    if map_path is not None and map_path.exists():
+      metadata = _load_map_metadata(map_path, args.map_metadata)
+      _apply_metadata_defaults(args, metadata)
   validate_args(args)
 
   try:
-    dataset = _build_dataset(args)
-    mapper = _build_mapper(args, dataset)
+    dataset = None
+    source_path = None
+    if args.source == "saved_map":
+      map_path = Path(args.load_map)
+      if not map_path.exists():
+        raise FileNotFoundError(f"Map file not found: {map_path}")
+      intrinsics_3x3 = _parse_intrinsics_from_metadata(metadata)
+      dataset = SimpleNamespace(intrinsics_3x3=intrinsics_3x3)
+      mapper = _build_mapper(args, dataset=dataset, intrinsics_3x3=intrinsics_3x3)
+      mapper.load(str(map_path))
+      processed = int(metadata.get("processed_frames", 0))
+      last_pose = None
+      source_path = metadata.get("source_path")
+    else:
+      dataset = _build_dataset(args)
+      mapper = _build_mapper(args, dataset)
+      max_frames = None if args.max_frames is None or args.max_frames < 0 else args.max_frames
+      processed, last_pose = map_rgbd_stream(
+        mapper=mapper,
+        dataset=dataset,
+        max_frames=max_frames,
+        depth_limit=args.depth_limit,
+      )
+      if processed <= 0:
+        raise RuntimeError("No frames were mapped. Cannot run query.")
+      if args.source == "mcap":
+        source_path = str(Path(args.mcap_path))
+      if args.save_map is not None:
+        save_map_path = Path(args.save_map)
+        save_map_path.parent.mkdir(parents=True, exist_ok=True)
+        mapper.save(str(save_map_path))
+        metadata_out = dict(
+          mapper_class=args.mapper_class,
+          mapper_kwargs=_parse_json_dict(args.mapper_kwargs, "--mapper-kwargs"),
+          encoder_class=args.encoder_class,
+          encoder_kwargs=_parse_json_dict(args.encoder_kwargs, "--encoder-kwargs"),
+          source=args.source,
+          source_path=source_path,
+          processed_frames=processed,
+          intrinsics_3x3=dataset.intrinsics_3x3.detach().cpu().tolist()
+            if hasattr(dataset, "intrinsics_3x3") else None,
+        )
+        metadata_path = _metadata_path_for_map(save_map_path)
+        metadata_path.write_text(json.dumps(metadata_out, indent=2), encoding="utf-8")
+        logger.info("Saved map to %s", save_map_path)
+        logger.info("Saved map metadata to %s", metadata_path)
   except MissingOptionalDependencyError as exc:
     print(f"ERROR: {exc}", file=sys.stderr)
     return 2
 
-  max_frames = None if args.max_frames is None or args.max_frames < 0 else args.max_frames
-  processed, last_pose = map_rgbd_stream(
-    mapper=mapper,
+  queries = _collect_queries(args)
+  estimates = list()
+  for query in queries:
+    estimate = query_object_position(
+      mapper=mapper,
+      query=query,
+      top_k=args.top_k,
+      cluster_radius_m=args.cluster_radius,
+      query_type=args.query_type,
+      softmax=args.softmax,
+      compressed=args.compressed_query,
+      reference_pose_4x4=last_pose,
+    )
+    estimates.append(estimate.as_dict())
+
+  run_config = _build_run_config(
+    args=args,
     dataset=dataset,
-    max_frames=max_frames,
-    depth_limit=args.depth_limit,
-  )
-  if processed <= 0:
-    raise RuntimeError("No frames were mapped. Cannot run query.")
-
-  estimate = query_object_position(
-    mapper=mapper,
-    query=args.query,
-    top_k=args.top_k,
-    cluster_radius_m=args.cluster_radius,
-    query_type=args.query_type,
-    softmax=args.softmax,
-    compressed=args.compressed_query,
-    reference_pose_4x4=last_pose,
+    loaded_map=args.load_map,
   )
 
-  output = estimate.as_dict()
-  output["processed_frames"] = processed
-  if args.source == "mcap":
-    output["source_path"] = str(Path(args.mcap_path))
-  output["run_config"] = dict(
-    source=args.source,
-    query_type=args.query_type,
-    top_k=args.top_k,
-    cluster_radius=args.cluster_radius,
-    max_frames=args.max_frames,
-    frame_skip=args.frame_skip,
-    depth_limit=args.depth_limit,
-    target_frame=args.target_frame,
-    pose_frame=args.pose_frame,
-    resolved_target_frame=getattr(dataset, "_resolved_target_frame", None),
-    resolved_pose_frame=getattr(dataset, "_resolved_pose_frame", None),
-    mapper_class=args.mapper_class,
-    encoder_class=args.encoder_class,
-  )
+  if len(estimates) == 1:
+    output = _single_query_output(
+      estimate_dict=estimates[0],
+      args=args,
+      processed_frames=processed,
+      source_path=source_path,
+      run_config=run_config,
+    )
+  else:
+    output = dict(
+      queries=estimates,
+      processed_frames=processed,
+      run_config=run_config,
+    )
+    if source_path is not None:
+      output["source_path"] = source_path
+
+  per_query_paths = list()
+  if args.per_query_output_dir is not None:
+    per_query_dir = Path(args.per_query_output_dir)
+    per_query_dir.mkdir(parents=True, exist_ok=True)
+    for estimate_dict in estimates:
+      per_query = _single_query_output(
+        estimate_dict=estimate_dict,
+        args=args,
+        processed_frames=processed,
+        source_path=source_path,
+        run_config=run_config,
+      )
+      file_name = f"{_slugify(estimate_dict['query'])}.json"
+      out_path = per_query_dir / file_name
+      out_path.write_text(json.dumps(per_query, indent=2), encoding="utf-8")
+      per_query_paths.append(str(out_path))
+    if len(estimates) > 1:
+      output["per_query_json"] = per_query_paths
+
   print(json.dumps(output, indent=2))
 
   if args.output_json is not None:

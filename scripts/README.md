@@ -1,5 +1,6 @@
 # Scripts
-- [semantic_query_cli](semantic_query_cli.py): CLI to build a RayFronts map from MCAP/live ROS2/dataset streams and return object position from top-k salient semantic voxels.
+- [semantic_query_cli](semantic_query_cli.py): CLI to build/load a RayFronts map from MCAP/live ROS2/dataset streams, query one or many objects, and return object position from salient semantic voxels.
+  See `README_SEMANTIC_QUERY.md` for complete usage models and examples.
 - [verify_query_overlay](verify_query_overlay.py): Projects `semantic_query_cli` output (`estimated_xyz` + salient voxels) back into MCAP RGB frames, scores visibility/salience across frames, and saves top-ranked overlay images (with frame skipping support).
 - [semseg_eval](semseg_eval.py): Script to perform open-vocabulary zero shot semantic segmentation evaluation. Has an option to load external point cloud predictions for evaluation giving the flexibility to evaluate approaches not ported to this repo.
 - [srchvol_eval](srchvol_eval.py): Script to perform the search volume online evaluation for the mapping baselines evaluated in RayFronts.
