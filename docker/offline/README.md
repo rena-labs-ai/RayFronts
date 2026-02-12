@@ -118,7 +118,7 @@ Things to check:
 
 Bridge tuning knobs (env vars, used by offline + live bridge mode):
 - `BRIDGE_SYNC_SLOP` (default `0.5`)
-- `BRIDGE_TF_TIMEOUT` (default `1.0`)
+- `BRIDGE_TF_TIMEOUT` (default `0.2`)
 - `BRIDGE_POSE_FALLBACK` (default `last`, options: `drop|last|identity`)
 - `BRIDGE_STATS_PERIOD` (default `30`)
 

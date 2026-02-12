@@ -27,7 +27,7 @@ DEPTH_IN="/base/camera/aligned_depth_to_color/image_raw/compressedDepth"
 CAMERA_INFO="/base/camera/color/camera_info"
 
 BRIDGE_SYNC_SLOP="${BRIDGE_SYNC_SLOP:-0.5}"
-BRIDGE_TF_TIMEOUT="${BRIDGE_TF_TIMEOUT:-1.0}"
+BRIDGE_TF_TIMEOUT="${BRIDGE_TF_TIMEOUT:-0.2}"
 BRIDGE_POSE_FALLBACK="${BRIDGE_POSE_FALLBACK:-last}"
 BRIDGE_STATS_PERIOD="${BRIDGE_STATS_PERIOD:-30}"
 

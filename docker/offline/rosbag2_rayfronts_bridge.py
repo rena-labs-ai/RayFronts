@@ -24,7 +24,9 @@ import numpy as np
 from PIL import Image as PilImage
 
 import rclpy
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.time import Time
@@ -196,6 +198,8 @@ class Rosbag2RayFrontsBridge(Node):
       raise ValueError("--pose-fallback must be one of: drop, last, identity")
 
     self._tf_buffer = Buffer()
+    self._tf_callback_group = ReentrantCallbackGroup()
+    self._image_callback_group = ReentrantCallbackGroup()
 
     # Some recordings/simulations can contain TF loops. tf2 refuses to serve
     # transforms when the tree is cyclic; dropping a single edge can break the
@@ -228,9 +232,19 @@ class Rosbag2RayFrontsBridge(Node):
       durability=DurabilityPolicy.VOLATILE,
     )
     self._tf_sub = self.create_subscription(
-      TFMessage, "/tf", self._on_tf, qos_profile=tf_qos)
+      TFMessage,
+      "/tf",
+      self._on_tf,
+      qos_profile=tf_qos,
+      callback_group=self._tf_callback_group,
+    )
     self._tf_static_sub = self.create_subscription(
-      TFMessage, "/tf_static", self._on_tf_static, qos_profile=tf_static_qos)
+      TFMessage,
+      "/tf_static",
+      self._on_tf_static,
+      qos_profile=tf_static_qos,
+      callback_group=self._tf_callback_group,
+    )
 
     self._rgb_pub = self.create_publisher(Image, topics.rgb_out, 10)
     self._depth_pub = self.create_publisher(Image, topics.depth_out, 10)
@@ -242,9 +256,19 @@ class Rosbag2RayFrontsBridge(Node):
       durability=DurabilityPolicy.VOLATILE,
     )
     self._rgb_sub = message_filters.Subscriber(
-      self, CompressedImage, topics.rgb_in, qos_profile=qos)
+      self,
+      CompressedImage,
+      topics.rgb_in,
+      qos_profile=qos,
+      callback_group=self._image_callback_group,
+    )
     self._depth_sub = message_filters.Subscriber(
-      self, CompressedImage, topics.depth_in, qos_profile=qos)
+      self,
+      CompressedImage,
+      topics.depth_in,
+      qos_profile=qos,
+      callback_group=self._image_callback_group,
+    )
 
     self._sync = message_filters.ApproximateTimeSynchronizer(
       [self._rgb_sub, self._depth_sub],
@@ -598,11 +622,21 @@ def main(argv: list[str] | None = None) -> int:
     dropped_tf_edges=dropped_tf_edges,
   )
 
+  # A multi-threaded executor prevents TF starvation when image callbacks
+  # wait for transforms with a timeout.
+  executor = MultiThreadedExecutor(num_threads=4)
+  executor.add_node(node)
+
   try:
-    rclpy.spin(node)
+    executor.spin()
   except KeyboardInterrupt:
     pass
   finally:
+    try:
+      executor.remove_node(node)
+    except Exception:
+      pass
+    executor.shutdown()
     node.destroy_node()
     try:
       rclpy.shutdown()
