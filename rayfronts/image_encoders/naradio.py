@@ -26,6 +26,7 @@ Typical Usage:
 
 from typing_extensions import override, List, Tuple
 
+import logging
 import torch
 
 from rayfronts.image_encoders.base import LangSpatialGlobalImageEncoder
@@ -35,6 +36,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 from timm.layers import use_fused_attn
 import math
+
+logger = logging.getLogger(__name__)
 
 
 class GaussKernelAttn(nn.Module):
@@ -155,6 +158,7 @@ class GaussKernelAttn(nn.Module):
     return attn_output
 
   def update_input_resolution(self, input_resolution):
+    self.input_resolution = input_resolution
     h, w = input_resolution
     n_patches = (w // 16, h //16)
     window_size = [side * 2 - 1 for side in n_patches]
@@ -216,6 +220,31 @@ class NARadioEncoder(LangSpatialGlobalImageEncoder):
     self.model.eval()
     self.model = self.model.to(self.device)
     self.model.make_preprocessor_external()
+
+    # RADIO has strict input size constraints. Snap the requested resolution
+    # to the closest supported size to avoid runtime failures.
+    try:
+      req_h, req_w = input_resolution
+    except Exception as e:
+      raise ValueError(
+        f"input_resolution must be a 2-tuple (height, width), got: {input_resolution!r}"
+      ) from e
+
+    nearest = self.model.get_nearest_supported_resolution(req_h, req_w)
+    try:
+      eff_h, eff_w = nearest
+    except Exception:
+      eff_h, eff_w = nearest.height, nearest.width
+
+    if (eff_h, eff_w) != (req_h, req_w):
+      logger.warning(
+        "NARadioEncoder input_resolution %s is not supported by RADIO; snapping to (%d, %d).",
+        (req_h, req_w),
+        eff_h,
+        eff_w,
+      )
+    input_resolution = (eff_h, eff_w)
+
     # Steal adaptors from RADIO so it does not auto compute adaptor output.
     # We want to control when that happens.
     self.lang_adaptor = self.model.adaptors[lang_model]
@@ -234,6 +263,30 @@ class NARadioEncoder(LangSpatialGlobalImageEncoder):
     if self.compile:
       self.model.compile(fullgraph=True, options={"triton.cudagraphs":True})
       self.lang_adaptor.compile(fullgraph=True, options={"triton.cudagraphs":True})
+
+  def _resize_to_encoder_resolution(
+    self, rgb_image: torch.FloatTensor) -> torch.FloatTensor:
+    """Resize inputs to the encoder's fixed resolution if needed.
+
+    RADIO (and our GaussKernelAttn addition) assumes a fixed token count per
+    forward pass. We therefore always resize to `self.input_resolution`.
+    """
+    if rgb_image.ndim != 4:
+      raise ValueError(f"Expected rgb_image of shape [B,C,H,W], got {tuple(rgb_image.shape)}")
+
+    _, _, h, w = rgb_image.shape
+    target_h, target_w = self.input_resolution
+    if (h, w) == (target_h, target_w):
+      return rgb_image
+
+    # Keep resizing on-device to avoid host-device thrash in streaming setups.
+    return F.interpolate(
+      rgb_image,
+      size=(target_h, target_w),
+      mode="bilinear",
+      align_corners=False,
+      antialias=False,
+    )
 
   @property
   def input_resolution(self):
@@ -266,15 +319,61 @@ class NARadioEncoder(LangSpatialGlobalImageEncoder):
   @override
   def encode_prompts(self, prompts: List[str]) -> torch.FloatTensor:
     with torch.autocast("cuda", dtype=torch.float16, enabled=self.amp):
-      text = self.lang_adaptor.tokenizer(prompts).to(self.device)
+      text = self._tokenize_prompts(prompts).to(self.device)
       text_features = self.lang_adaptor.encode_text(text)
       text_features /= text_features.norm(dim=-1, keepdim=True)
     return text_features.float()
+
+  def _tokenize_prompts(self, prompts: List[str]) -> torch.LongTensor:
+    """Tokenize prompts robustly across tokenizer API variants.
+
+    Some installed transformer tokenizers (e.g. certain T5 variants) do not
+    expose `batch_encode_plus`, while open_clip's HFTokenizer currently expects
+    it. Fall back to calling the underlying HuggingFace tokenizer directly.
+    """
+    tok = self.lang_adaptor.tokenizer
+    try:
+      return tok(prompts)
+    except AttributeError as e:
+      if "batch_encode_plus" not in str(e):
+        raise
+
+    hf_tok = getattr(tok, "tokenizer", None)
+    if hf_tok is None:
+      raise
+
+    clean_fn = getattr(tok, "clean_fn", None)
+    if callable(clean_fn):
+      prompts = [clean_fn(p) for p in prompts]
+
+    context_length = getattr(tok, "context_length", None)
+    if context_length is None:
+      raise ValueError("Tokenizer context_length is not set.")
+
+    encoded = hf_tok(
+      prompts,
+      return_tensors="pt",
+      max_length=context_length,
+      padding="max_length",
+      truncation=True,
+    )
+    tokens = getattr(encoded, "input_ids", None)
+    if tokens is None:
+      tokens = encoded["input_ids"]
+
+    if getattr(tok, "strip_sep_token", False):
+      sep_token_id = getattr(hf_tok, "sep_token_id", None)
+      if sep_token_id is not None:
+        tokens = torch.where(tokens == sep_token_id,
+                             torch.zeros_like(tokens),
+                             tokens)
+    return tokens
 
   @override
   def encode_image_to_vector(
     self, rgb_image: torch.FloatTensor) -> torch.FloatTensor:
 
+    rgb_image = self._resize_to_encoder_resolution(rgb_image)
     with torch.autocast("cuda", dtype=torch.float16, enabled=self.amp):
       out = self.model(rgb_image)
       C = out.summary.shape[-1] // 3
@@ -288,6 +387,7 @@ class NARadioEncoder(LangSpatialGlobalImageEncoder):
   @override
   def encode_image_to_feat_map(
     self, rgb_image: torch.FloatTensor) -> torch.FloatTensor:
+    rgb_image = self._resize_to_encoder_resolution(rgb_image)
     B, C, H, W = rgb_image.shape
     H_, W_ = H // self.model.patch_size, W // self.model.patch_size
     with torch.autocast("cuda", dtype=torch.float16, enabled=self.amp):
@@ -299,6 +399,7 @@ class NARadioEncoder(LangSpatialGlobalImageEncoder):
   @override
   def encode_image_to_feat_map_and_vector(self, rgb_image: torch.FloatTensor) \
       -> Tuple[torch.FloatTensor, torch.FloatTensor]:
+    rgb_image = self._resize_to_encoder_resolution(rgb_image)
     B, C, H, W = rgb_image.shape
     H_, W_ = H // self.model.patch_size, W // self.model.patch_size
     with torch.autocast("cuda", dtype=torch.float16, enabled=self.amp):
