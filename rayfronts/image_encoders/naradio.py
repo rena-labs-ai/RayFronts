@@ -38,7 +38,7 @@ import math
 
 
 class GaussKernelAttn(nn.Module):
-  """Encompases the NACLIP attention mechanism."""
+  """Encompasses the NACLIP attention mechanism."""
 
   def __init__(
     self,
@@ -191,8 +191,8 @@ class NARadioEncoder(LangSpatialGlobalImageEncoder):
         More models can be found on https://github.com/NVlabs/RADIO/
       lang_model: choose from ["siglip", "clip"]
       input_resolution: Tuple of ints (height, width) of the input images.
-        Needed to initialize the guassian attention window.
-      gauss_std: Standard deviation of the gaussian kernel.
+        Needed to initialize the Gaussian attention window.
+      gauss_std: Standard deviation of the Gaussian kernel.
       return_radio_features: Whether to return radio features which are not
         language aligned or whether to project them to the language aligned
         space directly. If True, then the user can always later use the
@@ -200,7 +200,7 @@ class NARadioEncoder(LangSpatialGlobalImageEncoder):
         `align_spatial_features_with_language` to project the radio features
         to be language aligned.
       compile: Whether to compile the model or not. Compiling may be faster but may increase memory usage.
-      amp: Whether to use automatic mixed percision or not.
+      amp: Whether to use automatic mixed precision or not.
     """
 
     super().__init__(device)
