@@ -3,10 +3,11 @@ channels:
   - defaults
   - pytorch
   - nvidia
+  - robostack-humble
   - conda-forge
   - pyg
 dependencies:
-  - python=3.12
+  - python=3.11
   - pytorch
   - numpy
   - matplotlib
@@ -15,6 +16,9 @@ dependencies:
   - pytorch-cuda=12.4
   - pandas
   - torch-scatter
+  - ros-humble-ros-base
+  - ros-humble-rmw-cyclonedds-cpp
+  - ros-humble-cyclonedds
   - pip
   - pip:
     - rerun-sdk
