@@ -15,6 +15,9 @@ dependencies:
   - torchaudio
   - pytorch-cuda=12.4
   - pandas
+  - packaging
+  - scikit-image
+  - opencv
   - torch-scatter
   - ros-humble-ros-base
   - ros-humble-rmw-cyclonedds-cpp

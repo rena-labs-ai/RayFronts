@@ -16,6 +16,13 @@ import torch
 from rayfronts.visualizers.base import Mapping3DVisualizer
 from rayfronts import feat_compressors
 
+def _set_stable_time_seconds(seconds: float) -> None:
+  """Set the rerun timeline across rerun-sdk API versions."""
+  if hasattr(rr, "set_time_seconds"):
+    rr.set_time_seconds("stable_time", seconds)
+  else:
+    rr.set_time("stable_time", duration=seconds)
+
 class RerunVis(Mapping3DVisualizer):
   """Semantic RGBD visualizer using ReRun.io
   
@@ -53,7 +60,7 @@ class RerunVis(Mapping3DVisualizer):
                      global_heat_scale, feat_compressor)
 
     rr.init("semantic_mapping_vis", spawn=True)
-    rr.set_time_seconds("stable_time", 0)
+    _set_stable_time_seconds(0)
     self._base_name = "world"
     rr.log(self._base_name, rr.ViewCoordinates.RDF, static=True)
     rr.log(self._base_name,
@@ -200,4 +207,4 @@ class RerunVis(Mapping3DVisualizer):
   @override
   def step(self):
     super().step()
-    rr.set_time_seconds("stable_time", self.time_step*0.1)
+    _set_stable_time_seconds(self.time_step*0.1)

@@ -66,7 +66,10 @@ class SemanticVoxelMap(SemanticRGBDMapping):
                max_pts_per_frame: int = 1000,
                vox_size: int = 1,
                vox_accum_period: int = 1,
-               windowing: bool = False):
+               windowing: bool = False,
+               cache_release_min_reserved_gb: float = 1.0,
+               cache_release_min_frag_percent: float = 40.0,
+               cache_release_period: int = 1):
     """
 
     Args:
@@ -87,6 +90,12 @@ class SemanticVoxelMap(SemanticRGBDMapping):
         throughput, and min latency.
       windowing: (Experimental) whether to filter out voxels within the FoV
         window first before aggregation for efficiency.
+      cache_release_min_reserved_gb: Release CUDA cache only if reserved memory
+        is above this threshold in GB.
+      cache_release_min_frag_percent: Release CUDA cache only if fragmentation
+        percentage (1 - allocated/reserved) is above this threshold.
+      cache_release_period: Check cache release policy every N voxel
+        accumulation updates.
     """
 
     super().__init__(intrinsics_3x3, device, visualizer, clip_bbox, encoder,
@@ -112,6 +121,10 @@ class SemanticVoxelMap(SemanticRGBDMapping):
     self._vox_accum_cnt = 0
     self._tmp_pc_xyz = list()
     self._tmp_pc_rgb_feat_conf = list()
+    self.cache_release_min_reserved_gb = cache_release_min_reserved_gb
+    self.cache_release_min_frag_percent = cache_release_min_frag_percent
+    self.cache_release_period = max(1, int(cache_release_period))
+    self._cache_release_tick = 0
 
   @property
   def global_vox_rgb(self) -> torch.FloatTensor:
@@ -303,11 +316,16 @@ class SemanticVoxelMap(SemanticRGBDMapping):
         [global_vox_rgb_feat_conf_update,
         self.global_vox_rgb_feat_conf[~active_bbox_mask]], dim=0)
 
-    # Smart cache management: release if heavily fragmented
+    # Smart cache management: release only if policy conditions are met.
     if torch.cuda.is_available():
+      self._cache_release_tick += 1
+      if self._cache_release_tick % self.cache_release_period != 0:
+        return
       allocated = torch.cuda.memory_allocated()
       cached = torch.cuda.memory_reserved()
-      if cached > 1e9 and (allocated / cached) < 0.4:
+      min_reserved_bytes = self.cache_release_min_reserved_gb * (1024 ** 3)
+      frag_percent = (1 - (allocated / cached)) * 100 if cached > 0 else 0.0
+      if cached > min_reserved_bytes and frag_percent > self.cache_release_min_frag_percent:
         torch.cuda.empty_cache()
         logger.debug("Released fragmented GPU cache")
 

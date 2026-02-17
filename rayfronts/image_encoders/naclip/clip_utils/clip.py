@@ -9,7 +9,7 @@ from typing import Union, List
 
 import torch
 from PIL import Image
-from pkg_resources import packaging
+from packaging import version
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 from tqdm import tqdm
 
@@ -23,7 +23,7 @@ try:
 except ImportError:
     BICUBIC = Image.BICUBIC
 
-if packaging.version.parse(torch.__version__) < packaging.version.parse("1.7.1"):
+if version.parse(torch.__version__) < version.parse("1.7.1"):
     warnings.warn("PyTorch version 1.7.1 or higher is recommended")
 
 __all__ = ["available_models", "load", "tokenize"]
